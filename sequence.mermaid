@@ -1,0 +1,68 @@
+sequenceDiagram
+    participant IT as Infra Team
+    participant TS as Temporal Server
+    participant IW as Infra Worker
+    participant TF as Terraform / Azure
+    participant AT as App Team
+    participant AW as App Worker
+    participant VM as Target VM
+
+    Note over IT,VM: PHASE 1 - Infra team provisions cloud resources
+
+    IT->>TS: start_workflow(InfraProvisioning)
+    TS->>IW: dispatch to infra-platform queue
+
+    IW->>TF: terraform init
+    TF-->>IW: providers ready
+
+    IW->>TF: terraform plan (-var project_name=myapp ...)
+    TF-->>IW: 7 resources to add
+
+    IW->>TF: terraform apply tfplan
+    Note right of TF: Creates RG, VNet, NSG,<br/>Subnet, PIP, NIC, VM
+    TF-->>IW: apply complete
+
+    IW->>VM: validate (SSH + health check)
+    VM-->>IW: healthy
+
+    IW-->>TS: InfraOutput {vm_ip: 20.185.72.14}
+    TS-->>IT: status: READY
+
+    Note over IT,VM: PHASE 2 - App team deploys (Temporal IS the CI/CD pipeline)
+
+    AT->>TS: query get_infra_output()
+    TS-->>AT: {vm_ip: 20.185.72.14, ready: true}
+
+    AT->>TS: start_workflow(CICDPipeline, target=20.185.72.14)
+    TS->>AW: dispatch to app-deployments queue
+
+    AW->>AW: git clone + build (activity)
+    AW->>AW: run tests (activity)
+    Note right of AW: 154/156 passed
+
+    AW->>VM: SCP artifact + restart service
+    VM-->>AW: health check passed
+
+    AW-->>TS: DeployResult {url: http://20.185.72.14:8080}
+    TS-->>AT: status: COMPLETED
+
+    Note over IT,VM: ONGOING - Redeploy via signal (no new workflow needed)
+
+    AT->>TS: signal trigger_redeploy(branch: main)
+    TS->>AW: wake up workflow
+    AW->>AW: git clone + build + test
+    AW->>VM: deploy new artifact
+    VM-->>AW: healthy
+
+    Note over IT,VM: FAILURE HANDLING
+
+    rect rgb(255, 230, 230)
+        Note right of TF: if terraform apply fails midway...
+        IW->>TF: terraform destroy (saga compensation)
+        TF-->>IW: resources cleaned up
+    end
+
+    rect rgb(255, 230, 230)
+        Note right of AW: if deploy fails...
+        AW->>VM: rollback to previous version
+    end

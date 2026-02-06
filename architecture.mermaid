@@ -1,0 +1,50 @@
+graph TB
+    subgraph "Temporal Server"
+        TQ1["Task Queue:<br/>infra-platform"]
+        TQ2["Task Queue:<br/>app-deployments"]
+    end
+
+    subgraph "Infra / Platform Team"
+        IS["infra.py provision"] -->|"start_workflow()"| TQ1
+        TQ1 --> IW["infra.py worker"]
+
+        subgraph InfraWorkflow["InfraProvisioningWorkflow"]
+            direction TB
+            TI["terraform init"] --> TP["terraform plan<br/>(7 resources)"]
+            TP --> TA["terraform apply<br/>RG + VNet + NSG + Subnet + PIP + NIC + VM"]
+            TA --> TV["validate<br/>SSH + health check"]
+        end
+
+        IW --> InfraWorkflow
+
+        subgraph TF["Terraform (main.tf)"]
+            RES["RG + VNet + NSG + Subnet + PIP + NIC + VM"]
+        end
+        InfraWorkflow -.-> TF
+    end
+
+    subgraph "App / Development Team"
+        AS["deploy.py run"] -->|"start_workflow()"| TQ2
+        TQ2 --> AW["deploy.py worker"]
+
+        subgraph CICDWorkflow["CICDPipelineWorkflow<br/>(Temporal IS the pipeline)"]
+            direction TB
+            BUILD["git clone + build<br/>(checkout_and_build)"]
+            TEST["run tests<br/>(run_tests)"]
+            DEP["deploy to VM<br/>(SCP + restart service)"]
+            BUILD --> TEST --> DEP
+        end
+
+        AW --> CICDWorkflow
+    end
+
+    %% the handoff between teams
+    TV -->|"InfraOutput<br/>(VM IP, admin user)"| AS
+    AS -.->|"query: get_infra_output()"| InfraWorkflow
+
+    %% compensation
+    TA -.->|"on failure"| TD["terraform destroy<br/>(saga compensation)"]
+    DEP -.->|"on failure"| RB["rollback_deployment"]
+
+    %% redeploy signal
+    HOOK["Webhook / git push"] -.->|"signal: trigger_redeploy()"| CICDWorkflow
